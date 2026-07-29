@@ -172,7 +172,7 @@ export default function VideoPlayer({
     if (!data) return;
     setIframeLoading(true);
     setReady(false);
-  }, [sourceIndex]);
+  }, [sourceIndex, data]);
 
   // ── Title fetch ─────────────────────────────────────────────────────────────
   useEffect(() => {

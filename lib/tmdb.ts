@@ -18,6 +18,9 @@ import {
   type CrewMember,
 } from './mock-data';
 
+export type { MediaItem, MediaType, Season, CastMember, CrewMember } from './mock-data';
+
+
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TMDB_KEY = process.env.TMDB_API_KEY?.trim();
 const TMDB_TOKEN = process.env.TMDB_API_READ_TOKEN?.trim();
