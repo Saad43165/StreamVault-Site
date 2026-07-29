@@ -28,6 +28,18 @@ interface TitleInfo {
   backdropPath: string;
 }
 
+// Resolved server-side via /api/proxy — real URL never sent to client
+function proxyUrl(
+  id: string,
+  type: string,
+  sourceIndex: number,
+  season: number,
+  episode: number,
+): string {
+  const base = `/api/proxy?id=${id}&type=${type}&source=${sourceIndex}`;
+  return type === 'tv' ? `${base}&season=${season}&episode=${episode}` : base;
+}
+
 export default function VideoPlayer({
   searchParams,
 }: {
@@ -42,9 +54,11 @@ export default function VideoPlayer({
   const [showSources, setShowSources] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [ready, setReady] = useState(false);
+  const [adBlocked, setAdBlocked] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const autoRotateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const adBlockedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const id = searchParams.id;
   const type = searchParams.type === 'tv' ? 'tv' : 'movie';
@@ -52,9 +66,56 @@ export default function VideoPlayer({
   const episode = Number(searchParams.episode) || 1;
   const backHref = type === 'tv' ? `/tv/${id}` : `/movie/${id}`;
 
-  const src = id ? `/api/proxy?id=${id}&type=${type}&source=${sourceIndex}&season=${season}&episode=${episode}` : null;
+  const showAdBlockedToast = useCallback(() => {
+    setAdBlocked(true);
+    if (adBlockedTimer.current) clearTimeout(adBlockedTimer.current);
+    adBlockedTimer.current = setTimeout(() => setAdBlocked(false), 2000);
+  }, []);
 
-  // ── Fetch source metadata ────────────────────────────────────────────────────
+  // ── Ad defense ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const originalOpen = window.open.bind(window);
+    window.open = () => null;
+
+    const originalAnchorClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      if (this.target === '_blank' || this.target === '_new') return;
+      originalAnchorClick.call(this);
+    };
+
+    const onDocClick = (e: MouseEvent) => {
+      const anchor = (e.target as HTMLElement).closest('a');
+      if (anchor && (anchor.target === '_blank' || anchor.target === '_new')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        showAdBlockedToast();
+      }
+    };
+    document.addEventListener('click', onDocClick, true);
+
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+
+    const onBlur = () => {
+      setTimeout(() => window.focus(), 0);
+      showAdBlockedToast();
+    };
+    window.addEventListener('blur', onBlur);
+
+    return () => {
+      window.open = originalOpen;
+      HTMLAnchorElement.prototype.click = originalAnchorClick;
+      document.removeEventListener('click', onDocClick, true);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('blur', onBlur);
+      if (adBlockedTimer.current) clearTimeout(adBlockedTimer.current);
+    };
+  }, [showAdBlockedToast]);
+
+  // ── Fetch source metadata (no URLs) ─────────────────────────────────────────
   useEffect(() => {
     if (!id) { setError('No media ID provided.'); setMetaLoading(false); return; }
     setMetaLoading(true);
@@ -73,18 +134,19 @@ export default function VideoPlayer({
       .catch(() => {});
   }, [id, type]);
 
-  // ── Reset on source/episode change ──────────────────────────────────────────
+  // ── Reset iframe when source or episode changes ──────────────────────────────
   useEffect(() => {
     setIframeLoading(true);
     setReady(false);
   }, [sourceIndex, season, episode]);
 
-  // ── Auto-rotate if stuck after 20s ──────────────────────────────────────────
+  // ── Auto-rotate if iframe stuck ──────────────────────────────────────────────
   useEffect(() => {
     if (!iframeLoading || !data) return;
     autoRotateTimer.current = setTimeout(() => {
+      // Auto-switch to next source if current one seems stuck
       setSourceIndex((i) => (i + 1) % data.sources.length);
-    }, 20000);
+    }, 15000);
     return () => { if (autoRotateTimer.current) clearTimeout(autoRotateTimer.current); };
   }, [iframeLoading, data, sourceIndex]);
 
@@ -112,25 +174,41 @@ export default function VideoPlayer({
     setSourceIndex((i) => (i + 1) % data.sources.length);
   }, [data]);
 
+  // ── Keyboard shortcuts ───────────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') window.location.href = backHref;
-      else if (e.key === 'n' || e.key === 'N') tryAnotherSource();
-      else if (e.key === 's' || e.key === 'S') setShowSources((s) => !s);
+      if (e.key === 'Escape') {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else window.location.href = backHref;
+      } else if (e.key === 'n' || e.key === 'N') tryAnotherSource();
+      else if (e.key === 'f' || e.key === 'F') {
+        const el = document.getElementById('player-wrap');
+        if (!document.fullscreenElement) el?.requestFullscreen?.();
+        else document.exitFullscreen();
+      } else if (e.key === 's' || e.key === 'S') setShowSources((s) => !s);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [backHref, tryAnotherSource]);
 
+  const enterFullscreen = () => {
+    const el = document.getElementById('player-wrap');
+    if (!document.fullscreenElement) el?.requestFullscreen?.();
+    else document.exitFullscreen();
+  };
+
   const currentSource = data?.sources[sourceIndex];
   const displayTitle = title?.title ?? (type === 'tv' ? `S${season}:E${episode}` : `Title #${id}`);
   const nextEpisodeHref = type === 'tv'
-    ? `/watch?id=${id}&type=tv&season=${season}&episode=${episode + 1}` : null;
+    ? `/watch?id=${id}&type=tv&season=${season}&episode=${episode + 1}`
+    : null;
   const heroArt = title?.backdropPath ? imageUrl(title.backdropPath, 'original') : null;
+  const src = id ? proxyUrl(id, type, sourceIndex, season, episode) : null;
 
   return (
     <div className="fixed inset-0 bg-black z-[100] flex flex-col select-none">
 
+      {/* Ambient art while loading */}
       {!ready && heroArt && (
         <div className="absolute inset-0 z-0">
           <Image src={heroArt} alt="" fill sizes="100vw" priority
@@ -139,16 +217,31 @@ export default function VideoPlayer({
         </div>
       )}
 
-      {/* Top bar */}
+      {/* Ad blocked toast */}
+      {adBlocked && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
+          <div className="inline-flex items-center gap-2 bg-emerald-500/20 border border-emerald-500/40 backdrop-blur text-emerald-300 text-xs font-semibold px-4 py-2 rounded-full shadow-lg">
+            <ShieldCheck className="w-3.5 h-3.5" /> Ad blocked
+          </div>
+        </div>
+      )}
+
+      {/* ── Top bar ─────────────────────────────────────── */}
       <div className={`absolute top-0 inset-x-0 z-30 flex items-center justify-between p-4 bg-gradient-to-b from-black/90 to-transparent transition-opacity duration-300 ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
         <Link href={backHref}
           className="inline-flex items-center gap-2 text-sm font-medium text-white/90 hover:text-white bg-black/40 backdrop-blur px-3 py-2 rounded-lg transition-colors">
           <ArrowLeft className="w-4 h-4" /> Back
         </Link>
+
         <div className="flex items-center gap-2">
           <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 backdrop-blur px-2.5 py-1.5 rounded-lg">
-            <ShieldCheck className="w-3.5 h-3.5" /> Ad-block Active
+            <ShieldCheck className="w-3.5 h-3.5" /> Ad-block
           </span>
+          <button onClick={enterFullscreen}
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-white/80 hover:text-white bg-black/40 backdrop-blur px-3 py-2 rounded-lg transition-colors">
+            <Maximize className="w-4 h-4" />
+            <span className="hidden sm:inline">Fullscreen</span>
+          </button>
           {data && (
             <div className="relative">
               <button onClick={() => setShowSources((s) => !s)}
@@ -160,12 +253,14 @@ export default function VideoPlayer({
               {showSources && (
                 <>
                   <div className="fixed inset-0 z-10" onClick={() => setShowSources(false)} />
-                  <div className="absolute right-0 mt-2 z-20 min-w-[240px] max-h-[70vh] overflow-y-auto bg-vault-card border border-white/10 rounded-lg shadow-2xl">
+                  <div className="absolute right-0 mt-2 z-20 min-w-[240px] max-h-[70vh] overflow-y-auto bg-vault-card border border-white/10 rounded-lg shadow-2xl overflow-hidden">
                     {data.sources.map((s, i) => (
                       <button key={i}
                         onClick={() => { setSourceIndex(i); setShowSources(false); }}
                         className={`w-full text-left px-4 py-2.5 text-sm hover:bg-white/5 transition-colors flex items-center justify-between ${i === sourceIndex ? 'text-vault-accent bg-vault-accent/5' : 'text-white/80'}`}>
-                        <span className="flex items-center gap-2"><List className="w-3.5 h-3.5" />{s.provider}</span>
+                        <span className="flex items-center gap-2">
+                          <List className="w-3.5 h-3.5" /> {s.provider}
+                        </span>
                         <span className="text-[10px] text-white/40">{s.tier}</span>
                       </button>
                     ))}
@@ -177,14 +272,20 @@ export default function VideoPlayer({
         </div>
       </div>
 
-      {/* Player */}
+      {/* ── Player ──────────────────────────────────────── */}
       <div className="flex-1 relative" id="player-wrap">
+
         {(metaLoading || (iframeLoading && !error)) && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 z-20">
             <Loader2 className="w-12 h-12 text-vault-accent animate-spin" />
             <p className="text-white/60 text-sm">
               {metaLoading ? 'Loading sources...' : `Loading ${currentSource?.provider ?? 'stream'}...`}
             </p>
+            {!metaLoading && (
+              <p className="text-white/30 text-xs">
+                If this takes too long, try another source (press <kbd className="px-1.5 py-0.5 bg-white/10 rounded text-[10px]">S</kbd>)
+              </p>
+            )}
           </div>
         )}
 
@@ -215,16 +316,15 @@ export default function VideoPlayer({
             src={src}
             title={currentSource?.provider ?? 'Stream'}
             className="absolute inset-0 w-full h-full border-0"
-            allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-            referrerPolicy="no-referrer"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-presentation"
+            allow="autoplay; fullscreen; encrypted-media; picture-in-picture; web-share"
+            referrerPolicy="no-referrer-when-downgrade"
             allowFullScreen
             onLoad={() => { setIframeLoading(false); setReady(true); }}
           />
         )}
       </div>
 
-      {/* Bottom bar */}
+      {/* ── Bottom bar ──────────────────────────────────── */}
       {!metaLoading && !error && data && (
         <div className={`absolute bottom-0 inset-x-0 z-30 p-4 bg-gradient-to-t from-black/90 via-black/50 to-transparent transition-opacity duration-300 ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
           <div className="flex items-center justify-between flex-wrap gap-3">
@@ -238,8 +338,11 @@ export default function VideoPlayer({
                 <p className="text-sm font-semibold truncate">{displayTitle}</p>
                 <p className="text-xs text-white/50 truncate">
                   <span className="text-vault-accent">{currentSource?.provider}</span>
-                  <span className="mx-1.5 text-white/20">·</span>{currentSource?.tier}
-                  {type === 'tv' && <><span className="mx-1.5 text-white/20">·</span>S{season}:E{episode}</>}
+                  <span className="mx-1.5 text-white/20">·</span>
+                  {currentSource?.tier}
+                  {type === 'tv' && (
+                    <><span className="mx-1.5 text-white/20">·</span>S{season}:E{episode}</>
+                  )}
                 </p>
               </div>
             </div>
