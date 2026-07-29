@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --radius: 0.75rem;
+    --background: 0 0% 4%;
+    --foreground: 0 0% 98%;
+    --card: 230 25% 14%;
+    --card-foreground: 0 0% 98%;
+    --popover: 230 25% 12%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 244 100% 71%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 230 20% 18%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 230 15% 20%;
+    --muted-foreground: 230 10% 65%;
+    --accent: 244 100% 71%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 230 20% 22%;
+    --input: 230 20% 22%;
+    --ring: 244 100% 71%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    color-scheme: dark;
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-vault-bg text-foreground;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer utilities {
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    height: 6px;
+    width: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted));
+    border-radius: 9999px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground));
+  }
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Plyr theme overrides */
+.plyr {
+  --plyr-color-main: #6c63ff;
+  --plyr-video-background: rgba(10, 10, 10, 1);
+  --plyr-menu-background: rgba(26, 26, 46, 0.95);
+  --plyr-control-spacing: 10px;
+  border-radius: 12px;
+}
+.plyr__poster {
+  background-size: cover;
+}
+.plyr--full-ui input[type='range'] {
+  color: #6c63ff;
+}
