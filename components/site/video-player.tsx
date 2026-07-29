@@ -28,14 +28,7 @@ interface TitleInfo {
   backdropPath: string;
 }
 
-// Resolved server-side via /api/proxy — real URL never sent to client
-function proxyUrl(
-  id: string,
-  type: string,
-  sourceIndex: number,
-  season: number,
-  episode: number,
-): string {
+function proxyUrl(id: string, type: string, sourceIndex: number, season: number, episode: number): string {
   const base = `/api/proxy?id=${id}&type=${type}&source=${sourceIndex}`;
   return type === 'tv' ? `${base}&season=${season}&episode=${episode}` : base;
 }
@@ -55,6 +48,7 @@ export default function VideoPlayer({
   const [controlsVisible, setControlsVisible] = useState(true);
   const [ready, setReady] = useState(false);
   const [adBlocked, setAdBlocked] = useState(false);
+  const [swReady, setSwReady] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const autoRotateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -72,8 +66,39 @@ export default function VideoPlayer({
     adBlockedTimer.current = setTimeout(() => setAdBlocked(false), 2000);
   }, []);
 
-  // ── Ad defense ──────────────────────────────────────────────────────────────
+  // ── Register Service Worker ad blocker ──────────────────────────────────────
   useEffect(() => {
+    if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+      setSwReady(true); // no SW support, proceed anyway
+      return;
+    }
+
+    navigator.serviceWorker
+      .register('/ad-blocker-sw.js', { scope: '/' })
+      .then((reg) => {
+        console.log('[SW] Ad blocker registered, scope:', reg.scope);
+
+        if (reg.active) {
+          setSwReady(true);
+          return;
+        }
+
+        // Wait for it to activate
+        const sw = reg.installing || reg.waiting;
+        if (sw) {
+          sw.addEventListener('statechange', () => {
+            if (sw.state === 'activated') setSwReady(true);
+          });
+        } else {
+          setSwReady(true);
+        }
+      })
+      .catch((err) => {
+        console.warn('[SW] Registration failed:', err);
+        setSwReady(true); // proceed without SW
+      });
+
+    // JS-level popup killer as backup
     const originalOpen = window.open.bind(window);
     window.open = () => null;
 
@@ -115,7 +140,7 @@ export default function VideoPlayer({
     };
   }, [showAdBlockedToast]);
 
-  // ── Fetch source metadata (no URLs) ─────────────────────────────────────────
+  // ── Fetch source metadata ────────────────────────────────────────────────────
   useEffect(() => {
     if (!id) { setError('No media ID provided.'); setMetaLoading(false); return; }
     setMetaLoading(true);
@@ -134,17 +159,16 @@ export default function VideoPlayer({
       .catch(() => {});
   }, [id, type]);
 
-  // ── Reset iframe when source or episode changes ──────────────────────────────
+  // ── Reset on source/episode change ──────────────────────────────────────────
   useEffect(() => {
     setIframeLoading(true);
     setReady(false);
   }, [sourceIndex, season, episode]);
 
-  // ── Auto-rotate if iframe stuck ──────────────────────────────────────────────
+  // ── Auto-rotate if stuck after 15s ──────────────────────────────────────────
   useEffect(() => {
     if (!iframeLoading || !data) return;
     autoRotateTimer.current = setTimeout(() => {
-      // Auto-switch to next source if current one seems stuck
       setSourceIndex((i) => (i + 1) % data.sources.length);
     }, 15000);
     return () => { if (autoRotateTimer.current) clearTimeout(autoRotateTimer.current); };
@@ -174,7 +198,6 @@ export default function VideoPlayer({
     setSourceIndex((i) => (i + 1) % data.sources.length);
   }, [data]);
 
-  // ── Keyboard shortcuts ───────────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -200,15 +223,13 @@ export default function VideoPlayer({
   const currentSource = data?.sources[sourceIndex];
   const displayTitle = title?.title ?? (type === 'tv' ? `S${season}:E${episode}` : `Title #${id}`);
   const nextEpisodeHref = type === 'tv'
-    ? `/watch?id=${id}&type=tv&season=${season}&episode=${episode + 1}`
-    : null;
+    ? `/watch?id=${id}&type=tv&season=${season}&episode=${episode + 1}` : null;
   const heroArt = title?.backdropPath ? imageUrl(title.backdropPath, 'original') : null;
-  const src = id ? proxyUrl(id, type, sourceIndex, season, episode) : null;
+  const src = id && swReady ? proxyUrl(id, type, sourceIndex, season, episode) : null;
 
   return (
     <div className="fixed inset-0 bg-black z-[100] flex flex-col select-none">
 
-      {/* Ambient art while loading */}
       {!ready && heroArt && (
         <div className="absolute inset-0 z-0">
           <Image src={heroArt} alt="" fill sizes="100vw" priority
@@ -217,7 +238,6 @@ export default function VideoPlayer({
         </div>
       )}
 
-      {/* Ad blocked toast */}
       {adBlocked && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
           <div className="inline-flex items-center gap-2 bg-emerald-500/20 border border-emerald-500/40 backdrop-blur text-emerald-300 text-xs font-semibold px-4 py-2 rounded-full shadow-lg">
@@ -226,16 +246,16 @@ export default function VideoPlayer({
         </div>
       )}
 
-      {/* ── Top bar ─────────────────────────────────────── */}
+      {/* Top bar */}
       <div className={`absolute top-0 inset-x-0 z-30 flex items-center justify-between p-4 bg-gradient-to-b from-black/90 to-transparent transition-opacity duration-300 ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
         <Link href={backHref}
           className="inline-flex items-center gap-2 text-sm font-medium text-white/90 hover:text-white bg-black/40 backdrop-blur px-3 py-2 rounded-lg transition-colors">
           <ArrowLeft className="w-4 h-4" /> Back
         </Link>
-
         <div className="flex items-center gap-2">
           <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 backdrop-blur px-2.5 py-1.5 rounded-lg">
-            <ShieldCheck className="w-3.5 h-3.5" /> Ad-block
+            <ShieldCheck className="w-3.5 h-3.5" />
+            {swReady ? 'Ad-block Active' : 'Ad-block'}
           </span>
           <button onClick={enterFullscreen}
             className="inline-flex items-center gap-1.5 text-sm font-medium text-white/80 hover:text-white bg-black/40 backdrop-blur px-3 py-2 rounded-lg transition-colors">
@@ -258,9 +278,7 @@ export default function VideoPlayer({
                       <button key={i}
                         onClick={() => { setSourceIndex(i); setShowSources(false); }}
                         className={`w-full text-left px-4 py-2.5 text-sm hover:bg-white/5 transition-colors flex items-center justify-between ${i === sourceIndex ? 'text-vault-accent bg-vault-accent/5' : 'text-white/80'}`}>
-                        <span className="flex items-center gap-2">
-                          <List className="w-3.5 h-3.5" /> {s.provider}
-                        </span>
+                        <span className="flex items-center gap-2"><List className="w-3.5 h-3.5" />{s.provider}</span>
                         <span className="text-[10px] text-white/40">{s.tier}</span>
                       </button>
                     ))}
@@ -272,18 +290,17 @@ export default function VideoPlayer({
         </div>
       </div>
 
-      {/* ── Player ──────────────────────────────────────── */}
+      {/* Player */}
       <div className="flex-1 relative" id="player-wrap">
-
-        {(metaLoading || (iframeLoading && !error)) && (
+        {(metaLoading || !swReady || (iframeLoading && !error)) && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 z-20">
             <Loader2 className="w-12 h-12 text-vault-accent animate-spin" />
             <p className="text-white/60 text-sm">
-              {metaLoading ? 'Loading sources...' : `Loading ${currentSource?.provider ?? 'stream'}...`}
+              {metaLoading || !swReady ? 'Initialising ad blocker...' : `Loading ${currentSource?.provider ?? 'stream'}...`}
             </p>
-            {!metaLoading && (
+            {!metaLoading && swReady && (
               <p className="text-white/30 text-xs">
-                If this takes too long, try another source (press <kbd className="px-1.5 py-0.5 bg-white/10 rounded text-[10px]">S</kbd>)
+                Taking too long? Press <kbd className="px-1.5 py-0.5 bg-white/10 rounded text-[10px]">S</kbd> to switch source
               </p>
             )}
           </div>
@@ -324,7 +341,7 @@ export default function VideoPlayer({
         )}
       </div>
 
-      {/* ── Bottom bar ──────────────────────────────────── */}
+      {/* Bottom bar */}
       {!metaLoading && !error && data && (
         <div className={`absolute bottom-0 inset-x-0 z-30 p-4 bg-gradient-to-t from-black/90 via-black/50 to-transparent transition-opacity duration-300 ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
           <div className="flex items-center justify-between flex-wrap gap-3">
@@ -338,11 +355,8 @@ export default function VideoPlayer({
                 <p className="text-sm font-semibold truncate">{displayTitle}</p>
                 <p className="text-xs text-white/50 truncate">
                   <span className="text-vault-accent">{currentSource?.provider}</span>
-                  <span className="mx-1.5 text-white/20">·</span>
-                  {currentSource?.tier}
-                  {type === 'tv' && (
-                    <><span className="mx-1.5 text-white/20">·</span>S{season}:E{episode}</>
-                  )}
+                  <span className="mx-1.5 text-white/20">·</span>{currentSource?.tier}
+                  {type === 'tv' && <><span className="mx-1.5 text-white/20">·</span>S{season}:E{episode}</>}
                 </p>
               </div>
             </div>
