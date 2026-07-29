@@ -11,8 +11,8 @@ import { adBlockScript } from '@/lib/adblock';
 import { imageUrl } from '@/lib/media-images';
 
 interface StreamSource {
+  index: number;
   provider: string;
-  url: string;
   tier: string;
 }
 
@@ -29,6 +29,19 @@ interface TitleInfo {
   posterPath: string;
   backdropPath: string;
   totalEpisodes?: number;
+}
+
+// Build proxy URL — real provider URL never leaves the server
+function buildProxyUrl(
+  id: string,
+  type: string,
+  sourceIndex: number,
+  season: number,
+  episode: number,
+): string {
+  const base = `/api/proxy?id=${id}&type=${type}&source=${sourceIndex}`;
+  if (type === 'tv') return `${base}&season=${season}&episode=${episode}`;
+  return base;
 }
 
 export default function VideoPlayer({
@@ -50,79 +63,60 @@ export default function VideoPlayer({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const autoRotateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const adBlockedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Timestamp of last user-intended click so we can distinguish real play-clicks from ad-clicks
-  const lastClickTime = useRef<number>(0);
-  // Whether the overlay should eat the next iframe focus (ad-click)
-  const overlayActive = useRef<boolean>(true);
 
   const id = searchParams.id;
   const type = searchParams.type === 'tv' ? 'tv' : 'movie';
   const season = Number(searchParams.season) || 1;
   const episode = Number(searchParams.episode) || 1;
 
-  const buildUrl = (idx: number) => {
-    const base = `/api/stream?id=${id}&type=${type}`;
-    if (type === 'tv') return `${base}&season=${season}&episode=${episode}&source=${idx}`;
-    return `${base}&source=${idx}`;
-  };
-
   const backHref = type === 'tv' ? `/tv/${id}` : `/movie/${id}`;
 
-  // ── Ad defense setup ──────────────────────────────────────────────────────────────────────────────
+  const showAdBlocked = () => {
+    setAdBlocked(true);
+    if (adBlockedTimer.current) clearTimeout(adBlockedTimer.current);
+    adBlockedTimer.current = setTimeout(() => setAdBlocked(false), 2000);
+  };
+
+  // ── Ad defense ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    // 1. Inject adblock DOM sweeper
+    // Inject DOM sweeper
     const script = document.createElement('script');
     script.textContent = adBlockScript;
     document.head.appendChild(script);
 
-    // 2. Kill window.open — blocks popup/pop-under
+    // Kill window.open
     const originalOpen = window.open.bind(window);
     window.open = () => null;
 
-    // 3. Override anchor .click() — stops programmatic <a target="_blank"> triggers
+    // Kill programmatic anchor .click() to _blank
     const originalAnchorClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
       if (this.target === '_blank' || this.target === '_new') return;
       originalAnchorClick.call(this);
     };
 
-    // 4. Document capture-phase click listener — intercepts ALL clicks including
-    //    those from inside the iframe that bubble to the document, blocking any
-    //    <a target="_blank"> that points to a non-video domain
-    const videoHosts = [
-      'vidsrc', 'multiembed', '2embed', 'autoembed', 'smashystream',
-      'vidlink', 'vidfast', 'vsembed', 'vidphantom', 'nontongo',
-      'moviesapi', 'filmu', 'vid-src', 'embedsu',
-    ];
+    // Block _blank anchor clicks at capture phase
     const onDocClick = (e: MouseEvent) => {
       const anchor = (e.target as HTMLElement).closest('a');
       if (anchor && (anchor.target === '_blank' || anchor.target === '_new')) {
-        const isVideoHost = videoHosts.some((h) => (anchor.href || '').includes(h));
-        if (!isVideoHost) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          setAdBlocked(true);
-          if (adBlockedTimer.current) clearTimeout(adBlockedTimer.current);
-          adBlockedTimer.current = setTimeout(() => setAdBlocked(false), 2000);
-        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        showAdBlocked();
       }
     };
     document.addEventListener('click', onDocClick, true);
 
-    // 5. beforeunload — stops iframe navigating the parent page away
+    // Stop iframe from navigating parent away
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = '';
     };
     window.addEventListener('beforeunload', onBeforeUnload);
 
-    // 6. blur — if a tab still opens somehow, yank focus back immediately
+    // If focus leaves (new tab opened anyway), yank it back
     const onBlur = () => {
       setTimeout(() => window.focus(), 0);
-      setAdBlocked(true);
-      if (adBlockedTimer.current) clearTimeout(adBlockedTimer.current);
-      adBlockedTimer.current = setTimeout(() => setAdBlocked(false), 2000);
-      overlayActive.current = true;
+      showAdBlocked();
     };
     window.addEventListener('blur', onBlur);
 
@@ -135,9 +129,10 @@ export default function VideoPlayer({
       window.removeEventListener('blur', onBlur);
       if (adBlockedTimer.current) clearTimeout(adBlockedTimer.current);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Stream fetch ────────────────────────────────────────────────────────────
+  // ── Stream metadata fetch (no URLs returned) ────────────────────────────────
   useEffect(() => {
     if (!id) {
       setError('No media ID provided.');
@@ -148,9 +143,8 @@ export default function VideoPlayer({
     setLoading(true);
     setError(null);
     setReady(false);
-    overlayActive.current = true;
 
-    fetch(buildUrl(sourceIndex))
+    fetch(`/api/stream?id=${id}&type=${type}`)
       .then((r) => {
         if (!r.ok) throw new Error('Failed to load stream');
         return r.json();
@@ -171,8 +165,14 @@ export default function VideoPlayer({
       cancelled = true;
       if (autoRotateTimer.current) clearTimeout(autoRotateTimer.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceIndex, id, type, season, episode]);
+  }, [id, type]);
+
+  // Re-load iframe when source index changes (without re-fetching metadata)
+  useEffect(() => {
+    if (!data) return;
+    setIframeLoading(true);
+    setReady(false);
+  }, [sourceIndex]);
 
   // ── Title fetch ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -240,8 +240,6 @@ export default function VideoPlayer({
   const handleIframeLoad = () => {
     setIframeLoading(false);
     setReady(true);
-    // Re-arm the overlay after each new load — first click after load is almost always an ad
-    overlayActive.current = true;
   };
 
   const enterFullscreen = () => {
@@ -250,37 +248,13 @@ export default function VideoPlayer({
     else document.exitFullscreen();
   };
 
-  // ── Overlay click handler ───────────────────────────────────────────────────
-  // The overlay sits invisibly on top of the iframe at all times.
-  // When a click comes through (which would have gone to the iframe and triggered an ad):
-  //   - We eat it, show "Ad blocked", then disarm the overlay for 4s so the
-  //     user can interact with the player normally (play/pause etc).
-  //   - After 4s of inactivity the overlay re-arms for the next ad attempt.
-  const overlayRearmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const handleOverlayClick = (e: React.MouseEvent) => {
-    if (!overlayActive.current) return; // overlay is disarmed, let click pass to iframe
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Show blocked toast
-    setAdBlocked(true);
-    if (adBlockedTimer.current) clearTimeout(adBlockedTimer.current);
-    adBlockedTimer.current = setTimeout(() => setAdBlocked(false), 2000);
-
-    // Disarm overlay for 4s so the user can control the player
-    overlayActive.current = false;
-    if (overlayRearmTimer.current) clearTimeout(overlayRearmTimer.current);
-    overlayRearmTimer.current = setTimeout(() => {
-      overlayActive.current = true;
-    }, 4000);
-  };
-
   const displayTitle = title?.title ?? (type === 'tv' ? `S${season}:E${episode}` : `Title #${id}`);
   const nextEpisodeHref =
     type === 'tv' ? `/watch?id=${id}&type=tv&season=${season}&episode=${episode + 1}` : null;
   const heroArt = title?.backdropPath ? imageUrl(title.backdropPath, 'original') : null;
+  const proxyUrl = id
+    ? buildProxyUrl(id, type, sourceIndex, season, episode)
+    : null;
 
   return (
     <div className="fixed inset-0 bg-black z-[100] flex flex-col select-none">
@@ -303,7 +277,7 @@ export default function VideoPlayer({
       {/* Ad blocked toast */}
       {adBlocked && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
-          <div className="inline-flex items-center gap-2 bg-emerald-500/20 border border-emerald-500/40 backdrop-blur text-emerald-300 text-xs font-semibold px-4 py-2 rounded-full shadow-lg animate-fade-in">
+          <div className="inline-flex items-center gap-2 bg-emerald-500/20 border border-emerald-500/40 backdrop-blur text-emerald-300 text-xs font-semibold px-4 py-2 rounded-full shadow-lg">
             <ShieldCheck className="w-3.5 h-3.5" />
             Ad blocked
           </div>
@@ -350,7 +324,7 @@ export default function VideoPlayer({
               {showSources && (
                 <>
                   <div className="fixed inset-0 z-10" onClick={() => setShowSources(false)} />
-                  <div className="absolute right-0 mt-2 z-20 min-w-[240px] max-h-[70vh] overflow-y-auto scrollbar-thin bg-vault-card border border-white/10 rounded-lg shadow-2xl overflow-hidden animate-fade-in">
+                  <div className="absolute right-0 mt-2 z-20 min-w-[240px] max-h-[70vh] overflow-y-auto scrollbar-thin bg-vault-card border border-white/10 rounded-lg shadow-2xl overflow-hidden">
                     {data.sources.map((s, i) => (
                       <button
                         key={i}
@@ -385,7 +359,7 @@ export default function VideoPlayer({
         )}
 
         {error && !loading && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-center px-4 animate-fade-in z-20">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-center px-4 z-20">
             <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center">
               <AlertTriangle className="w-8 h-8 text-red-400" />
             </div>
@@ -412,14 +386,13 @@ export default function VideoPlayer({
           </div>
         )}
 
-        {!loading && !error && data && (
+        {!loading && !error && data && proxyUrl && (
           <div className="w-full h-full relative bg-black">
-
             {iframeLoading && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 z-10 pointer-events-none">
                 <Loader2 className="w-12 h-12 text-vault-accent animate-spin" />
                 <p className="text-white/70 text-sm font-medium">
-                  Loading {data.current.provider}...
+                  Loading {data.sources[sourceIndex]?.provider ?? 'stream'}...
                 </p>
                 <p className="text-white/40 text-xs">
                   If video doesn&apos;t appear, switch sources (press{' '}
@@ -429,27 +402,16 @@ export default function VideoPlayer({
             )}
 
             {/*
-              AD BLOCKER OVERLAY
-              Always rendered on top of the iframe (z-[6]).
-              Uses pointer-events:none normally so mouse moves/hovers pass through,
-              but on click it intercepts via onClickCapture at the capture phase.
-
-              How it works:
-              - overlayActive.current = true  → first click is eaten (ad blocked)
-              - overlayActive.current = false → overlay is disarmed, clicks pass to iframe (play/pause)
-              - After 4s idle, overlay re-arms automatically for the next ad trigger
+              The iframe loads /api/proxy which fetches the provider server-side,
+              strips ad scripts, and serves the HTML from your own domain.
+              No sandbox needed — the proxy CSP header handles popup blocking.
+              No overlay needed — clicks go directly to the player.
             */}
-            <div
-              className="absolute inset-0 z-[6]"
-              style={{ pointerEvents: 'all', background: 'transparent' }}
-              onClickCapture={handleOverlayClick}
-            />
-
             <iframe
               ref={iframeRef}
-              key={data.current.url}
-              src={data.current.url}
-              title={data.current.provider}
+              key={proxyUrl}
+              src={proxyUrl}
+              title={data.sources[sourceIndex]?.provider ?? 'Stream'}
               className="absolute inset-0 w-full h-full border-0"
               allow="autoplay; fullscreen; encrypted-media; picture-in-picture; web-share"
               referrerPolicy="no-referrer-when-downgrade"
@@ -483,9 +445,11 @@ export default function VideoPlayer({
               <div className="min-w-0">
                 <p className="text-sm font-semibold truncate">{displayTitle}</p>
                 <p className="text-xs text-white/50 truncate">
-                  <span className="text-vault-accent">{data.current.provider}</span>
+                  <span className="text-vault-accent">
+                    {data.sources[sourceIndex]?.provider ?? 'Stream'}
+                  </span>
                   <span className="mx-1.5 text-white/20">·</span>
-                  {data.current.tier}
+                  {data.sources[sourceIndex]?.tier ?? ''}
                   {type === 'tv' && (
                     <>
                       <span className="mx-1.5 text-white/20">·</span>
