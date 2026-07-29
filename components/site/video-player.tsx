@@ -28,11 +28,6 @@ interface TitleInfo {
   backdropPath: string;
 }
 
-function proxyUrl(id: string, type: string, sourceIndex: number, season: number, episode: number): string {
-  const base = `/api/proxy?id=${id}&type=${type}&source=${sourceIndex}`;
-  return type === 'tv' ? `${base}&season=${season}&episode=${episode}` : base;
-}
-
 export default function VideoPlayer({
   searchParams,
 }: {
@@ -47,12 +42,9 @@ export default function VideoPlayer({
   const [showSources, setShowSources] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [ready, setReady] = useState(false);
-  const [adBlocked, setAdBlocked] = useState(false);
-  const [swReady, setSwReady] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const autoRotateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const adBlockedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const id = searchParams.id;
   const type = searchParams.type === 'tv' ? 'tv' : 'movie';
@@ -60,85 +52,7 @@ export default function VideoPlayer({
   const episode = Number(searchParams.episode) || 1;
   const backHref = type === 'tv' ? `/tv/${id}` : `/movie/${id}`;
 
-  const showAdBlockedToast = useCallback(() => {
-    setAdBlocked(true);
-    if (adBlockedTimer.current) clearTimeout(adBlockedTimer.current);
-    adBlockedTimer.current = setTimeout(() => setAdBlocked(false), 2000);
-  }, []);
-
-  // ── Register Service Worker ad blocker ──────────────────────────────────────
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
-      setSwReady(true); // no SW support, proceed anyway
-      return;
-    }
-
-    navigator.serviceWorker
-      .register('/ad-blocker-sw.js', { scope: '/' })
-      .then((reg) => {
-        console.log('[SW] Ad blocker registered, scope:', reg.scope);
-
-        if (reg.active) {
-          setSwReady(true);
-          return;
-        }
-
-        // Wait for it to activate
-        const sw = reg.installing || reg.waiting;
-        if (sw) {
-          sw.addEventListener('statechange', () => {
-            if (sw.state === 'activated') setSwReady(true);
-          });
-        } else {
-          setSwReady(true);
-        }
-      })
-      .catch((err) => {
-        console.warn('[SW] Registration failed:', err);
-        setSwReady(true); // proceed without SW
-      });
-
-    // JS-level popup killer as backup
-    const originalOpen = window.open.bind(window);
-    window.open = () => null;
-
-    const originalAnchorClick = HTMLAnchorElement.prototype.click;
-    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
-      if (this.target === '_blank' || this.target === '_new') return;
-      originalAnchorClick.call(this);
-    };
-
-    const onDocClick = (e: MouseEvent) => {
-      const anchor = (e.target as HTMLElement).closest('a');
-      if (anchor && (anchor.target === '_blank' || anchor.target === '_new')) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        showAdBlockedToast();
-      }
-    };
-    document.addEventListener('click', onDocClick, true);
-
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = '';
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-
-    const onBlur = () => {
-      setTimeout(() => window.focus(), 0);
-      showAdBlockedToast();
-    };
-    window.addEventListener('blur', onBlur);
-
-    return () => {
-      window.open = originalOpen;
-      HTMLAnchorElement.prototype.click = originalAnchorClick;
-      document.removeEventListener('click', onDocClick, true);
-      window.removeEventListener('beforeunload', onBeforeUnload);
-      window.removeEventListener('blur', onBlur);
-      if (adBlockedTimer.current) clearTimeout(adBlockedTimer.current);
-    };
-  }, [showAdBlockedToast]);
+  const src = id ? `/api/proxy?id=${id}&type=${type}&source=${sourceIndex}&season=${season}&episode=${episode}` : null;
 
   // ── Fetch source metadata ────────────────────────────────────────────────────
   useEffect(() => {
@@ -165,12 +79,12 @@ export default function VideoPlayer({
     setReady(false);
   }, [sourceIndex, season, episode]);
 
-  // ── Auto-rotate if stuck after 15s ──────────────────────────────────────────
+  // ── Auto-rotate if stuck after 20s ──────────────────────────────────────────
   useEffect(() => {
     if (!iframeLoading || !data) return;
     autoRotateTimer.current = setTimeout(() => {
       setSourceIndex((i) => (i + 1) % data.sources.length);
-    }, 15000);
+    }, 20000);
     return () => { if (autoRotateTimer.current) clearTimeout(autoRotateTimer.current); };
   }, [iframeLoading, data, sourceIndex]);
 
@@ -200,32 +114,19 @@ export default function VideoPlayer({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        if (document.fullscreenElement) document.exitFullscreen();
-        else window.location.href = backHref;
-      } else if (e.key === 'n' || e.key === 'N') tryAnotherSource();
-      else if (e.key === 'f' || e.key === 'F') {
-        const el = document.getElementById('player-wrap');
-        if (!document.fullscreenElement) el?.requestFullscreen?.();
-        else document.exitFullscreen();
-      } else if (e.key === 's' || e.key === 'S') setShowSources((s) => !s);
+      if (e.key === 'Escape') window.location.href = backHref;
+      else if (e.key === 'n' || e.key === 'N') tryAnotherSource();
+      else if (e.key === 's' || e.key === 'S') setShowSources((s) => !s);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [backHref, tryAnotherSource]);
-
-  const enterFullscreen = () => {
-    const el = document.getElementById('player-wrap');
-    if (!document.fullscreenElement) el?.requestFullscreen?.();
-    else document.exitFullscreen();
-  };
 
   const currentSource = data?.sources[sourceIndex];
   const displayTitle = title?.title ?? (type === 'tv' ? `S${season}:E${episode}` : `Title #${id}`);
   const nextEpisodeHref = type === 'tv'
     ? `/watch?id=${id}&type=tv&season=${season}&episode=${episode + 1}` : null;
   const heroArt = title?.backdropPath ? imageUrl(title.backdropPath, 'original') : null;
-  const src = id && swReady ? proxyUrl(id, type, sourceIndex, season, episode) : null;
 
   return (
     <div className="fixed inset-0 bg-black z-[100] flex flex-col select-none">
@@ -238,14 +139,6 @@ export default function VideoPlayer({
         </div>
       )}
 
-      {adBlocked && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
-          <div className="inline-flex items-center gap-2 bg-emerald-500/20 border border-emerald-500/40 backdrop-blur text-emerald-300 text-xs font-semibold px-4 py-2 rounded-full shadow-lg">
-            <ShieldCheck className="w-3.5 h-3.5" /> Ad blocked
-          </div>
-        </div>
-      )}
-
       {/* Top bar */}
       <div className={`absolute top-0 inset-x-0 z-30 flex items-center justify-between p-4 bg-gradient-to-b from-black/90 to-transparent transition-opacity duration-300 ${controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
         <Link href={backHref}
@@ -254,14 +147,8 @@ export default function VideoPlayer({
         </Link>
         <div className="flex items-center gap-2">
           <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 backdrop-blur px-2.5 py-1.5 rounded-lg">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            {swReady ? 'Ad-block Active' : 'Ad-block'}
+            <ShieldCheck className="w-3.5 h-3.5" /> Ad-block Active
           </span>
-          <button onClick={enterFullscreen}
-            className="inline-flex items-center gap-1.5 text-sm font-medium text-white/80 hover:text-white bg-black/40 backdrop-blur px-3 py-2 rounded-lg transition-colors">
-            <Maximize className="w-4 h-4" />
-            <span className="hidden sm:inline">Fullscreen</span>
-          </button>
           {data && (
             <div className="relative">
               <button onClick={() => setShowSources((s) => !s)}
@@ -273,7 +160,7 @@ export default function VideoPlayer({
               {showSources && (
                 <>
                   <div className="fixed inset-0 z-10" onClick={() => setShowSources(false)} />
-                  <div className="absolute right-0 mt-2 z-20 min-w-[240px] max-h-[70vh] overflow-y-auto bg-vault-card border border-white/10 rounded-lg shadow-2xl overflow-hidden">
+                  <div className="absolute right-0 mt-2 z-20 min-w-[240px] max-h-[70vh] overflow-y-auto bg-vault-card border border-white/10 rounded-lg shadow-2xl">
                     {data.sources.map((s, i) => (
                       <button key={i}
                         onClick={() => { setSourceIndex(i); setShowSources(false); }}
@@ -292,17 +179,12 @@ export default function VideoPlayer({
 
       {/* Player */}
       <div className="flex-1 relative" id="player-wrap">
-        {(metaLoading || !swReady || (iframeLoading && !error)) && (
+        {(metaLoading || (iframeLoading && !error)) && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 z-20">
             <Loader2 className="w-12 h-12 text-vault-accent animate-spin" />
             <p className="text-white/60 text-sm">
-              {metaLoading || !swReady ? 'Initialising ad blocker...' : `Loading ${currentSource?.provider ?? 'stream'}...`}
+              {metaLoading ? 'Loading sources...' : `Loading ${currentSource?.provider ?? 'stream'}...`}
             </p>
-            {!metaLoading && swReady && (
-              <p className="text-white/30 text-xs">
-                Taking too long? Press <kbd className="px-1.5 py-0.5 bg-white/10 rounded text-[10px]">S</kbd> to switch source
-              </p>
-            )}
           </div>
         )}
 
@@ -333,8 +215,9 @@ export default function VideoPlayer({
             src={src}
             title={currentSource?.provider ?? 'Stream'}
             className="absolute inset-0 w-full h-full border-0"
-            allow="autoplay; fullscreen; encrypted-media; picture-in-picture; web-share"
-            referrerPolicy="no-referrer-when-downgrade"
+            allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+            referrerPolicy="no-referrer"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-presentation"
             allowFullScreen
             onLoad={() => { setIframeLoading(false); setReady(true); }}
           />
